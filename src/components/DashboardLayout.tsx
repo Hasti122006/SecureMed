@@ -24,8 +24,13 @@ const DashboardLayout = ({ children, title, subtitle, navItems }: DashboardLayou
   const { signOut, profile } = useAuth();
 
   const handleLogout = async () => {
-    await signOut();
-    navigate("/login");
+    try {
+      await signOut();
+    } catch (error) {
+      console.error("Logout error in layout:", error);
+    } finally {
+      navigate("/login");
+    }
   };
 
   return (

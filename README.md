@@ -1,4 +1,4 @@
-# Welcome to your Lovable project
+#  cursor Welcome to your Lovable project
 
 ## Project info
 

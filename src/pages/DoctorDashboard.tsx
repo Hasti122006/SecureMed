@@ -1,5 +1,5 @@
 import DashboardLayout from "@/components/DashboardLayout";
-import { LayoutDashboard, Upload, FileText, PenTool, Users } from "lucide-react";
+import { LayoutDashboard, Upload, FileText, PenTool, Users, User } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
@@ -26,11 +26,23 @@ const DoctorDashboard = () => {
     const [{ count: rc }, { count: pc }, { data: recent }] = await Promise.all([
       supabase.from("medical_records").select("*", { count: "exact", head: true }).eq("doctor_id", user!.id),
       supabase.from("prescriptions").select("*", { count: "exact", head: true }).eq("doctor_id", user!.id),
-      supabase.from("medical_records").select("*").eq("doctor_id", user!.id).order("created_at", { ascending: false }).limit(5),
+      supabase.from("medical_records").select("*").eq("doctor_id", user!.id).order("created_at", { ascending: false }).limit(10),
     ]);
     setRecordCount(rc || 0);
     setPrescriptionCount(pc || 0);
-    setRecentUploads(recent || []);
+    const rows = recent || [];
+    const patientIds = [...new Set(rows.map((r) => r.patient_id))];
+    let nameById: Record<string, string> = {};
+    if (patientIds.length > 0) {
+      const { data: profs } = await supabase.from("profiles").select("user_id, full_name").in("user_id", patientIds);
+      nameById = Object.fromEntries((profs || []).map((p) => [p.user_id, p.full_name]));
+    }
+    setRecentUploads(
+      rows.map((r) => ({
+        ...r,
+        patient_display_name: nameById[r.patient_id] || "Patient (name unavailable)",
+      }))
+    );
   };
 
   const stats = [
@@ -76,20 +88,27 @@ const DoctorDashboard = () => {
 
       <div className="bg-card border border-border rounded-xl shadow-card">
         <div className="p-5 border-b border-border">
-          <h3 className="font-display font-semibold text-foreground">Recent Uploads</h3>
+          <h3 className="font-display font-semibold text-foreground">Recent uploads</h3>
+          <p className="text-xs text-muted-foreground mt-1">Each row shows which patient received the file.</p>
         </div>
         <div className="divide-y divide-border">
           {recentUploads.length === 0 ? (
             <p className="px-5 py-8 text-center text-sm text-muted-foreground">No uploads yet. Start by uploading a medical record.</p>
           ) : (
             recentUploads.map((r) => (
-              <div key={r.id} className="px-5 py-4 flex items-center justify-between">
-                <div>
-                  <p className="font-medium text-sm text-foreground">{r.file_name}</p>
-                  <p className="text-xs text-muted-foreground">{r.record_type} · {new Date(r.created_at).toLocaleDateString()}</p>
+              <div key={r.id} className="px-5 py-4 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="font-medium text-sm text-foreground truncate">{r.file_name}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {r.record_type} · {new Date(r.created_at).toLocaleDateString()}
+                  </p>
+                  <p className="text-xs text-primary font-medium mt-1.5 flex items-center gap-1.5">
+                    <User className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Patient: {r.patient_display_name}</span>
+                  </p>
                 </div>
-                <span className="text-xs font-medium px-2 py-1 rounded-full bg-primary/10 text-primary">
-                  🔒 Encrypted
+                <span className="text-xs font-medium px-2 py-1 rounded-full bg-primary/10 text-primary shrink-0">
+                  Encrypted
                 </span>
               </div>
             ))

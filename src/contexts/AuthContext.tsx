@@ -25,13 +25,48 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [profile, setProfile] = useState<{ full_name: string } | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchUserData = async (userId: string) => {
-    const [{ data: roles }, { data: prof }] = await Promise.all([
-      supabase.from("user_roles").select("role").eq("user_id", userId).single(),
-      supabase.from("profiles").select("full_name").eq("user_id", userId).single(),
-    ]);
-    if (roles) setRole(roles.role);
-    if (prof) setProfile(prof);
+const fetchUserData = async (userId: string) => {
+    console.log(`🔍 fetchUserData for userId: ${userId}`);
+    try {
+      const timeoutPromise = (promise: Promise<any>, ms: number) => 
+        Promise.race([
+          promise,
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
+          )
+        ]);
+
+      const [rolesPromise, profPromise] = await Promise.all([
+        timeoutPromise(supabase.from("user_roles").select("role").eq("user_id", userId).single(), 5000),
+        timeoutPromise(supabase.from("profiles").select("full_name").eq("user_id", userId).single(), 5000)
+      ]);
+
+      const [{ data: roles, error: roleError }] = [rolesPromise];
+      const [{ data: prof, error: profError }] = [profPromise];
+      
+      console.log('Role query:', { roles, roleError });
+      console.log('Profile query:', { prof, profError });
+
+      if (roleError) {
+        console.error("Error fetching user role:", roleError);
+      } else if (roles) {
+        setRole(roles.role);
+        console.log(`✅ Set role: ${roles.role}`);
+      } else {
+        console.log('⚠️ No role found for user');
+      }
+      
+      if (profError) {
+        console.error("Error fetching user profile:", profError);
+      } else if (prof) {
+        setProfile(prof);
+        console.log(`✅ Set profile: ${prof.full_name}`);
+      } else {
+        console.log('⚠️ No profile found for user');
+      }
+    } catch (err: any) {
+      console.error("❌ Error/timeout in fetchUserData:", err.message);
+    }
   };
 
   useEffect(() => {
@@ -40,7 +75,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setSession(session);
         setUser(session?.user ?? null);
         if (session?.user) {
-          setTimeout(() => fetchUserData(session.user.id), 0);
+          await fetchUserData(session.user.id);
         } else {
           setRole(null);
           setProfile(null);
@@ -49,11 +84,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       }
     );
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       setSession(session);
       setUser(session?.user ?? null);
       if (session?.user) {
-        fetchUserData(session.user.id);
+        await fetchUserData(session.user.id);
       }
       setLoading(false);
     });
@@ -62,7 +97,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const signUp = async (email: string, password: string, fullName: string, role: AppRole) => {
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -71,6 +106,23 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       },
     });
     if (error) throw error;
+    
+    // Create profile and role in database
+    if (data.user) {
+      const userId = data.user.id;
+      
+      // Create profile
+      await supabase.from("profiles").insert({
+        user_id: userId,
+        full_name: fullName,
+      });
+      
+      // Create user role
+      await supabase.from("user_roles").insert({
+        user_id: userId,
+        role: role,
+      });
+    }
   };
 
   const signIn = async (email: string, password: string) => {
@@ -79,11 +131,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-    setSession(null);
-    setRole(null);
-    setProfile(null);
+    try {
+      await supabase.auth.signOut();
+    } catch (e) {
+      console.error("Supabase signout produced an error, proceeding with local signout:", e);
+    } finally {
+      setUser(null);
+      setSession(null);
+      setRole(null);
+      setProfile(null);
+    }
   };
 
   return (

@@ -1,11 +1,12 @@
 import DashboardLayout from "@/components/DashboardLayout";
-import { LayoutDashboard, FileText, Download, CheckCircle2, XCircle, Search, ShieldCheck } from "lucide-react";
+import { LayoutDashboard, FileText, Download, CheckCircle2, Search, ShieldCheck, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useState, useEffect } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
-import { importAESKey, decryptFileAES, hashFileSHA256 } from "@/lib/crypto";
+import { importAESKey, decryptFileAES, hashFileSHA256, verifySignatureECDSA } from "@/lib/crypto";
 import { toast } from "sonner";
 
 const navItems = [
@@ -16,6 +17,8 @@ const navItems = [
 
 const ViewRecords = () => {
   const { user } = useAuth();
+  const { pathname } = useLocation();
+  const isDownloadsView = pathname.includes("/downloads");
   const [records, setRecords] = useState<any[]>([]);
   const [prescriptions, setPrescriptions] = useState<any[]>([]);
   const [search, setSearch] = useState("");
@@ -24,9 +27,9 @@ const ViewRecords = () => {
   useEffect(() => {
     if (user) {
       fetchRecords();
-      fetchPrescriptions();
+      if (!isDownloadsView) fetchPrescriptions();
     }
-  }, [user]);
+  }, [user, isDownloadsView]);
 
   const fetchRecords = async () => {
     const { data } = await supabase
@@ -102,20 +105,122 @@ const ViewRecords = () => {
     r.record_type.toLowerCase().includes(search.toLowerCase())
   );
 
+  const handleDownloadPrescriptionProof = async (p: {
+    id: string;
+    medication: string;
+    instructions: string;
+    created_at: string;
+    prescription_data: string;
+    ecdsa_signature: string;
+    ecdsa_public_key: string;
+  }) => {
+    if (!p.prescription_data || !p.ecdsa_signature || !p.ecdsa_public_key) {
+      toast.error("This prescription has no signature data stored — re-issue from your doctor.");
+      return;
+    }
+    try {
+      const ok = await verifySignatureECDSA(p.ecdsa_public_key, p.ecdsa_signature, p.prescription_data);
+      if (!ok) {
+        toast.error("Signature verification failed — do not trust this prescription data.");
+        return;
+      }
+      const bundle = {
+        medguard_export_version: "1.0",
+        description:
+          "Real ECDSA P-256 + SHA-256 signature (Web Crypto). The signature was computed over prescription_data (exact string, byte-for-byte).",
+        issued_at_utc: p.created_at,
+        medication: p.medication,
+        instructions: p.instructions,
+        prescription_data: p.prescription_data,
+        ecdsa_signature_base64: p.ecdsa_signature,
+        ecdsa_public_key_spki_base64: p.ecdsa_public_key,
+      };
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `prescription-signed-${p.medication.replace(/[/\\?%*:|"<>]/g, "_").slice(0, 40)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Downloaded signed prescription — signature verified ✓");
+      void supabase.from("audit_logs").insert({
+        user_id: user!.id,
+        action: "download_prescription_proof",
+        details: `Exported signed JSON for prescription ${p.id}`,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Export failed";
+      toast.error(msg);
+    }
+  };
+
+  const layoutTitle = isDownloadsView ? "Downloads" : "My Medical Records";
+  const layoutSubtitle = isDownloadsView
+    ? "Decrypt AES-256–protected files and save them to your device. Integrity is verified with SHA-256 before download."
+    : "View, verify, and download your encrypted medical records";
+
   return (
-    <DashboardLayout title="My Medical Records" subtitle="View, verify, and download your encrypted medical records" navItems={navItems}>
+    <DashboardLayout title={layoutTitle} subtitle={layoutSubtitle} navItems={navItems}>
+      {isDownloadsView && (
+        <div className="mb-6 p-4 rounded-xl border border-primary/20 bg-primary/5 text-sm text-muted-foreground">
+          <p className="text-foreground font-medium mb-1">Looking for prescriptions or the full table?</p>
+          <p>
+            Use{" "}
+            <Link to="/patient/records" className="text-primary font-medium hover:underline inline-flex items-center gap-1">
+              My Records <ArrowRight className="w-3.5 h-3.5" />
+            </Link>{" "}
+            to browse everything in one place.
+          </p>
+        </div>
+      )}
+
       <div className="mb-6 relative max-w-md">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
         <Input placeholder="Search records..." className="pl-10" value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
 
-      {/* Medical Records */}
+      {/* Medical Records — table on My Records; cards on Downloads */}
       <div className="bg-card border border-border rounded-xl shadow-card mb-6">
         <div className="p-5 border-b border-border">
-          <h3 className="font-display font-semibold text-foreground">Encrypted Medical Records ({filteredRecords.length})</h3>
+          <h3 className="font-display font-semibold text-foreground">
+            {isDownloadsView ? "Files ready to download" : "Encrypted Medical Records"} ({filteredRecords.length})
+          </h3>
         </div>
         {filteredRecords.length === 0 ? (
           <p className="px-5 py-8 text-center text-sm text-muted-foreground">No medical records found</p>
+        ) : isDownloadsView ? (
+          <div className="p-5 grid gap-4 sm:grid-cols-2">
+            {filteredRecords.map((r) => (
+              <div
+                key={r.id}
+                className="rounded-xl border border-border bg-muted/20 p-4 flex flex-col gap-3"
+              >
+                <div>
+                  <p className="font-medium text-foreground">{r.file_name}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {r.record_type} · {new Date(r.created_at).toLocaleDateString()}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-medical-teal/10 text-medical-teal font-medium">
+                    <CheckCircle2 className="w-3 h-3" /> SHA-256
+                  </span>
+                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-primary/10 text-primary font-medium">
+                    <ShieldCheck className="w-3 h-3" /> AES-256
+                  </span>
+                </div>
+                <Button
+                  className="w-full mt-auto"
+                  size="lg"
+                  onClick={() => handleDecryptDownload(r)}
+                  disabled={decrypting === r.id}
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  {decrypting === r.id ? "Decrypting…" : "Decrypt & download"}
+                </Button>
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -165,30 +270,56 @@ const ViewRecords = () => {
         )}
       </div>
 
-      {/* Prescriptions */}
-      <div className="bg-card border border-border rounded-xl shadow-card">
-        <div className="p-5 border-b border-border">
-          <h3 className="font-display font-semibold text-foreground">My Prescriptions ({prescriptions.length})</h3>
-        </div>
-        {prescriptions.length === 0 ? (
-          <p className="px-5 py-8 text-center text-sm text-muted-foreground">No prescriptions found</p>
-        ) : (
-          <div className="divide-y divide-border">
-            {prescriptions.map((p) => (
-              <div key={p.id} className="px-5 py-4">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="font-medium text-foreground">{p.medication}</p>
-                  <span className="text-xs font-medium px-2 py-1 rounded-full bg-medical-teal/10 text-medical-teal">
-                    ECDSA Signed ✓
-                  </span>
-                </div>
-                <p className="text-sm text-muted-foreground">{p.instructions}</p>
-                <p className="text-xs text-muted-foreground mt-1">{new Date(p.created_at).toLocaleDateString()}</p>
-              </div>
-            ))}
+      {/* Prescriptions only on My Records */}
+      {!isDownloadsView && (
+        <div className="bg-card border border-border rounded-xl shadow-card">
+          <div className="p-5 border-b border-border">
+            <h3 className="font-display font-semibold text-foreground">My Prescriptions ({prescriptions.length})</h3>
           </div>
-        )}
-      </div>
+          {prescriptions.length === 0 ? (
+            <p className="px-5 py-8 text-center text-sm text-muted-foreground">No prescriptions found</p>
+          ) : (
+            <div className="divide-y divide-border">
+              {prescriptions.map((p) => (
+                <div key={p.id} className="px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <p className="font-medium text-foreground">{p.medication}</p>
+                      <span className="text-xs font-medium px-2 py-1 rounded-full bg-medical-teal/10 text-medical-teal shrink-0">
+                        ECDSA Signed ✓
+                      </span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">{p.instructions}</p>
+                    <p className="text-xs text-muted-foreground mt-1">{new Date(p.created_at).toLocaleDateString()}</p>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      The digital signature is real (P-256 + SHA-256). Download a JSON file that includes the signature and public key for verification.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 self-start sm:self-center"
+                    onClick={() =>
+                      handleDownloadPrescriptionProof({
+                        id: p.id,
+                        medication: p.medication,
+                        instructions: p.instructions,
+                        created_at: p.created_at,
+                        prescription_data: p.prescription_data,
+                        ecdsa_signature: p.ecdsa_signature,
+                        ecdsa_public_key: p.ecdsa_public_key,
+                      })
+                    }
+                  >
+                    <Download className="w-3.5 h-3.5 mr-1.5" />
+                    Download signed JSON
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </DashboardLayout>
   );
 };

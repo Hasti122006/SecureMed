@@ -76,6 +76,9 @@ const UploadRecord = () => {
     fetchPatients();
   }, []);
 
+  const selectedPatientName =
+    patients.find((p) => p.user_id === patientId)?.full_name ?? (patientId ? "Selected patient" : "");
+
   const handleUpload = async () => {
     if (!file || !patientId || !user) {
       toast.error("Please fill in all fields and select a file");
@@ -107,14 +110,17 @@ const UploadRecord = () => {
       const exportedKey = await exportAESKey(aesKey);
       log("✓ AES key exported for secure storage");
 
-      // Step 6: Upload encrypted file to storage
-      const filePath = `${patientId}/${Date.now()}_${file.name}.enc`;
+      // Step 6: Upload encrypted file to storage (safe object name; odd chars can break Storage API)
+      const safeBaseName = file.name.replace(/[/\\?#%*:[\]\s]+/g, "_").slice(0, 180);
+      const filePath = `${patientId}/${Date.now()}_${safeBaseName}.enc`;
       const encryptedBlob = new Blob([encrypted]);
       const { error: storageError } = await supabase.storage
         .from("medical-records")
-        .upload(filePath, encryptedBlob);
+        .upload(filePath, encryptedBlob, { upsert: true, contentType: "application/octet-stream" });
 
-      if (storageError) throw storageError;
+      if (storageError) {
+        throw new Error(`Storage: ${storageError.message}`);
+      }
       log("✓ Encrypted file uploaded to secure storage");
 
       // Step 7: Store metadata in database
@@ -130,23 +136,30 @@ const UploadRecord = () => {
         sha256_hash: sha256Hash,
       });
 
-      if (dbError) throw dbError;
+      if (dbError) {
+        const detail = [dbError.message, dbError.details, dbError.hint].filter(Boolean).join(" — ");
+        throw new Error(`Database: ${detail}`);
+      }
       log("✓ Record metadata saved to database");
 
       // Step 8: Audit log
       await supabase.from("audit_logs").insert({
         user_id: user.id,
         action: "upload_record",
-        details: `Uploaded ${file.name} for patient ${patientId}`,
+        details: `Uploaded ${file.name} for patient ${selectedPatientName}`,
       });
       log("✓ Audit log entry created");
 
-      toast.success("Medical record encrypted and uploaded successfully!");
+      toast.success(`Saved for ${selectedPatientName}: ${file.name}`);
       setFile(null);
       setDescription("");
-    } catch (err: any) {
-      log(`✗ Error: ${err.message}`);
-      toast.error(err.message || "Upload failed");
+    } catch (err: unknown) {
+      const msg =
+        err && typeof err === "object" && "message" in err
+          ? String((err as { message?: string }).message)
+          : String(err);
+      log(`✗ Error: ${msg}`);
+      toast.error(msg || "Upload failed");
     } finally {
       setUploading(false);
     }
@@ -167,7 +180,7 @@ const UploadRecord = () => {
                   onChange={(e) => setPatientId(e.target.value)}
                 >
                   <option value="" disabled>Select a patient...</option>
-                  {patients.map(p => (
+                  {patients.map((p) => (
                     <option key={p.user_id} value={p.user_id}>
                       {p.full_name}
                     </option>
@@ -175,6 +188,12 @@ const UploadRecord = () => {
                 </select>
               ) : (
                 <Input placeholder="Loading patients..." disabled />
+              )}
+              {patientId && selectedPatientName && (
+                <p className="text-sm rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-muted-foreground">
+                  File will be stored under patient:{" "}
+                  <span className="font-semibold text-foreground">{selectedPatientName}</span>
+                </p>
               )}
             </div>
             <div className="space-y-2">
